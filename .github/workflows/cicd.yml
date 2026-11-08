@@ -1,0 +1,113 @@
+name: CI e CD - projetos 3D
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fazer checkout do repositório
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configurar Node.js para verificar o JavaScript
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verificar sintaxe do JavaScript
+        run: |
+          node --check Projeto1/script.js
+          node --check Projeto2/script.js
+
+      - name: Validar páginas e preparar arquivos estáticos
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import json
+          import shutil
+
+          class Page(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.refs = []
+                  self.importmap = False
+                  self.map_text = ''
+                  self.canvas = False
+
+              def handle_starttag(self, tag, attrs):
+                  attrs = dict(attrs)
+                  if tag == 'canvas':
+                      self.canvas = True
+                  if tag == 'link' and attrs.get('rel') == 'stylesheet':
+                      self.refs.append(attrs.get('href', ''))
+                  if tag == 'script':
+                      if attrs.get('src'):
+                          self.refs.append(attrs['src'])
+                      self.importmap = attrs.get('type') == 'importmap'
+
+              def handle_data(self, data):
+                  if self.importmap:
+                      self.map_text += data
+
+              def handle_endtag(self, tag):
+                  if tag == 'script':
+                      self.importmap = False
+
+          site = Path('_site')
+          site.mkdir()
+          for name in ('Projeto1', 'Projeto2'):
+              source = Path(name)
+              html = (source / 'index.html').read_text(encoding='utf-8')
+              if name == 'Projeto1':
+                  html = html.replace('"/Projeto1/', '"./')
+              parser = Page()
+              parser.feed(html)
+              assert parser.canvas, f'{name}: canvas ausente'
+              imports = json.loads(parser.map_text)['imports']
+              assert imports['three'].startswith('https://unpkg.com/three@0.162.0/'), f'{name}: importmap inesperado'
+              for ref in parser.refs:
+                  assert ref and not ref.startswith('/'), f'{name}: caminho absoluto: {ref}'
+                  assert (source / ref).is_file(), f'{name}: arquivo ausente: {ref}'
+              shutil.copytree(source, site / name)
+              (site / name / 'index.html').write_text(html, encoding='utf-8')
+              print(f'{name}: HTML, importmap e arquivos locais verificados')
+
+          (site / 'index.html').write_text(
+              '<!doctype html><html lang="pt-br"><meta charset="utf-8">'
+              '<title>Projetos 3D</title><h1>Projetos 3D</h1>'
+              '<a href="Projeto1/">Projeto 1</a><br>'
+              '<a href="Projeto2/">Projeto 2</a></html>', encoding='utf-8')
+          PY
+
+      - name: Enviar arquivos validados para o GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publicar versão validada
+        id: deployment
+        uses: actions/deploy-pages@v4
